@@ -90,17 +90,12 @@ export class LoadBalancer extends DurableObject {
 				} else if (response.status === 429) {
 					// Still getting 429, increment failed_count
 					const newFailedCount = failedCount + 1;
-					if (newFailedCount >= 5) {
-						// Delete the key if it has failed 5 times
-						await this.ctx.storage.sql.exec('DELETE FROM api_keys WHERE api_key = ?', apiKey);
-					} else {
-						await this.ctx.storage.sql.exec(
-							'UPDATE api_key_statuses SET failed_count = ?, last_checked_at = ? WHERE api_key = ?',
-							newFailedCount,
-							Date.now(),
-							apiKey
-						);
-					}
+					await this.ctx.storage.sql.exec(
+						'UPDATE api_key_statuses SET failed_count = ?, last_checked_at = ? WHERE api_key = ?',
+						newFailedCount,
+						Date.now(),
+						apiKey
+					);
 				}
 			} catch (e) {
 				console.error(`Error checking abnormal key ${apiKey}:`, e);
@@ -140,6 +135,12 @@ export class LoadBalancer extends DurableObject {
 					await this.ctx.storage.sql.exec('UPDATE api_key_statuses SET last_checked_at = ? WHERE api_key = ?', Date.now(), apiKey);
 				}
 			} catch (e) {
+				// 即使检查失败，也不删除密钥，只更新失败计数
+				await this.ctx.storage.sql.exec(
+					"UPDATE api_key_statuses SET key_group = 'abnormal', failed_count = failed_count + 1, last_checked_at = ? WHERE api_key = ?",
+					Date.now(),
+					apiKey
+				);
 				console.error(`Error checking normal key ${apiKey}:`, e);
 			}
 		}
@@ -247,6 +248,7 @@ export class LoadBalancer extends DurableObject {
 
 		if (response.status === 429) {
 			console.log(`API key ${apiKey} received 429 status code.`);
+			// 不再删除密钥，只更新状态
 			await this.ctx.storage.sql.exec(
 				"UPDATE api_key_statuses SET key_group = 'abnormal', failed_count = failed_count + 1, last_checked_at = ? WHERE api_key = ?",
 				Date.now(),
@@ -985,11 +987,21 @@ private async transformMessages(messages: any[]) {
 						);
 					}
 				} else {
+					// 不直接删除无效密钥，而是将它们标记为异常状态
 					if (endpointPath) {
 						const normalizedPath = endpointPath === '/' ? '/' : `/${endpointPath.replace(/^\/+|\/+$/g, '')}/`;
-						await this.ctx.storage.sql.exec('DELETE FROM api_keys WHERE api_key = ? AND endpoint_path = ?', result.key, normalizedPath);
+						await this.ctx.storage.sql.exec(
+							"UPDATE api_key_statuses SET status = 'abnormal', key_group = 'abnormal', failed_count = failed_count + 1, last_checked_at = ? WHERE api_key = ? AND endpoint_path = ?",
+							Date.now(),
+							result.key,
+							normalizedPath
+						);
 					} else {
-						await this.ctx.storage.sql.exec('DELETE FROM api_keys WHERE api_key = ?', result.key);
+						await this.ctx.storage.sql.exec(
+							"UPDATE api_key_statuses SET status = 'abnormal', key_group = 'abnormal', failed_count = failed_count + 1, last_checked_at = ? WHERE api_key = ?",
+							Date.now(),
+							result.key
+						);
 					}
 				}
 			}
