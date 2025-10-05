@@ -84,6 +84,9 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 							<a href="#" id="nav-add-keys" class="block py-2.5 px-4 rounded-lg hover:bg-slate-700 transition-colors">
 								添加密钥
 							</a>
+							<a href="#" id="nav-endpoints" class="block py-2.5 px-4 rounded-lg hover:bg-slate-700 transition-colors">
+								端点管理
+							</a>
 						</nav>
 					</div>
 					<div class="flex-1 p-8 overflow-y-auto">
@@ -160,6 +163,17 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 							<div class="bg-white p-6 rounded-lg shadow-sm">
 								<h3 class="text-xl font-semibold mb-4 text-slate-600">批量添加密钥</h3>
 								<form id="add-keys-form">
+									<div class="mb-4">
+										<label class="block text-slate-700 text-sm font-bold mb-2" for="endpoint-path">
+											端点路径 (可选)
+										</label>
+										<input
+											type="text"
+											id="endpoint-path"
+											class="w-full p-3 border rounded-lg bg-slate-50 focus:ring-2 focus:ring-teal-500 focus:border-teal-500 transition"
+											placeholder="例如: /my-endpoint/ (默认为 /)"
+										/>
+									</div>
 									<textarea
 										id="api-keys"
 										class="w-full h-48 p-3 border rounded-lg bg-slate-50 focus:ring-2 focus:ring-teal-500 focus:border-teal-500 transition"
@@ -174,6 +188,32 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 								</form>
 							</div>
 						</div>
+						<div id="page-endpoints" class="hidden">
+							<h2 class="text-3xl font-bold mb-6 text-slate-700">端点管理</h2>
+							<div class="bg-white p-6 rounded-lg shadow-sm">
+								<div class="flex justify-between items-center mb-4">
+									<h3 class="text-xl font-semibold text-slate-600">已配置的端点</h3>
+									<button
+										id="refresh-endpoints-btn"
+										class="px-4 py-2 bg-slate-200 text-slate-700 rounded-lg hover:bg-slate-300 transition-colors shadow-sm"
+									>
+										刷新
+									</button>
+								</div>
+								<div class="max-h-96 overflow-y-auto border rounded-lg">
+									<table id="endpoints-table" class="w-full text-left">
+										<thead class="bg-slate-50">
+											<tr class="border-b border-slate-200">
+												<th class="p-3 text-slate-600 font-semibold">端点路径</th>
+												<th class="p-3 text-slate-600 font-semibold">密钥数量</th>
+												<th class="p-3 text-slate-600 font-semibold">操作</th>
+											</tr>
+										</thead>
+										<tbody class="divide-y divide-slate-200"></tbody>
+									</table>
+								</div>
+							</div>
+						</div>
 					</div>
 				</div>
 
@@ -184,6 +224,7 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 										const addKeysForm = document.getElementById('add-keys-form');
 										const apiKeysTextarea = document.getElementById('api-keys');
 										const refreshKeysBtn = document.getElementById('refresh-keys-btn');
+										const refreshEndpointsBtn = document.getElementById('refresh-endpoints-btn');
 										const keysTableBody = document.querySelector('#keys-table tbody');
 										const selectAllCheckbox = document.getElementById('select-all-keys');
 										const deleteSelectedBtn = document.getElementById('delete-selected-keys-btn');
@@ -196,28 +237,32 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 
 										const navKeysList = document.getElementById('nav-keys-list');
 										const navAddKeys = document.getElementById('nav-add-keys');
+										const navEndpoints = document.getElementById('nav-endpoints');
 										const pageKeysList = document.getElementById('page-keys-list');
 										const pageAddKeys = document.getElementById('page-add-keys');
+										const pageEndpoints = document.getElementById('page-endpoints');
 
 										let currentPage = 1;
 										const pageSize = 50;
 										let totalPages = 1;
+										let currentEndpointPath = null;
 
 										const showPage = (pageId) => {
-											[pageKeysList, pageAddKeys].forEach(page => {
+											[pageKeysList, pageAddKeys, pageEndpoints].forEach(page => {
 												if (page.id === pageId) {
 													page.classList.remove('hidden');
 												} else {
 													page.classList.add('hidden');
 												}
 											});
-											[navKeysList, navAddKeys].forEach(nav => {
-												if (nav.id === \`nav-\${pageId.split('-')[1]}-\${pageId.split('-')[2]}\`) {
-													nav.classList.add('bg-gray-700');
-													nav.classList.remove('hover:bg-gray-700');
+											[navKeysList, navAddKeys, navEndpoints].forEach(nav => {
+												if (nav.id === \`nav-\${pageId.split('-')[1]}-\${pageId.split('-')[2]}\` || 
+												    (pageId === 'page-endpoints' && nav.id === 'nav-endpoints')) {
+													nav.classList.add('bg-slate-700');
+													nav.classList.remove('hover:bg-slate-700');
 												} else {
-													nav.classList.remove('bg-gray-700');
-													nav.classList.add('hover:bg-gray-700');
+													nav.classList.remove('bg-slate-700');
+													nav.classList.add('hover:bg-slate-700');
 												}
 											});
 										};
@@ -225,11 +270,20 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 										navKeysList.addEventListener('click', (e) => {
 											e.preventDefault();
 											showPage('page-keys-list');
+											currentEndpointPath = null;
+											currentPage = 1;
+											fetchAndRenderKeys();
 										});
 
 										navAddKeys.addEventListener('click', (e) => {
 											e.preventDefault();
 											showPage('page-add-keys');
+										});
+
+										navEndpoints.addEventListener('click', (e) => {
+											e.preventDefault();
+											showPage('page-endpoints');
+											fetchAndRenderEndpoints();
 										});
 
 										const updatePaginationControls = () => {
@@ -238,10 +292,68 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 												nextPageBtn.disabled = currentPage >= totalPages;
 										};
 
+										const fetchAndRenderEndpoints = async () => {
+											const endpointsTableBody = document.querySelector('#endpoints-table tbody');
+											endpointsTableBody.innerHTML = '<tr><td colspan="3" class="p-2 text-center">加载中...</td></tr>';
+											try {
+												const response = await fetch('/api/endpoints');
+												const { endpoints } = await response.json();
+												
+												endpointsTableBody.innerHTML = '';
+												if (endpoints.length === 0) {
+													endpointsTableBody.innerHTML = '<tr><td colspan="3" class="p-2 text-center">暂无端点</td></tr>';
+												} else {
+													// 获取每个端点的密钥数量
+													const endpointStats = {};
+													for (const endpoint of endpoints) {
+														try {
+															const keysResponse = await fetch('/api/keys?endpointPath=' + encodeURIComponent(endpoint));
+															const { total } = await keysResponse.json();
+															endpointStats[endpoint] = total;
+														} catch (e) {
+															endpointStats[endpoint] = '未知';
+														}
+													}
+													
+													endpoints.forEach(endpoint => {
+														const row = document.createElement('tr');
+														row.className = 'hover:bg-slate-50 transition-colors';
+														row.innerHTML = 
+															'<td class="p-3 font-mono text-sm text-slate-700">' + endpoint + '</td>' +
+															'<td class="p-3">' + (endpointStats[endpoint] || 0) + '</td>' +
+															'<td class="p-3">' +
+																'<button class="view-keys-btn px-3 py-1 bg-sky-500 text-white rounded hover:bg-sky-600 text-sm" data-endpoint="' + endpoint + '">' +
+																	'查看密钥' +
+																'</button>' +
+															'</td>';
+														endpointsTableBody.appendChild(row);
+													});
+													
+													// 添加查看密钥按钮事件
+													document.querySelectorAll('.view-keys-btn').forEach(btn => {
+														btn.addEventListener('click', (e) => {
+															const endpoint = e.target.dataset.endpoint;
+															currentEndpointPath = endpoint;
+															currentPage = 1;
+															showPage('page-keys-list');
+															fetchAndRenderKeys();
+														});
+													});
+												}
+											} catch (error) {
+												endpointsTableBody.innerHTML = '<tr><td colspan="3" class="p-2 text-center text-red-500">加载失败</td></tr>';
+												console.error('Failed to fetch endpoints:', error);
+											}
+										};
+
 										const fetchAndRenderKeys = async () => {
 												keysTableBody.innerHTML = '<tr><td colspan="7" class="p-2 text-center">加载中...</td></tr>';
 												try {
-												  const response = await fetch(\`/api/keys?page=\${currentPage}&pageSize=\${pageSize}\`);
+												  let url = '/api/keys?page=' + currentPage + '&pageSize=' + pageSize;
+												  if (currentEndpointPath) {
+													url += '&endpointPath=' + encodeURIComponent(currentEndpointPath);
+												  }
+												  const response = await fetch(url);
 												  const { keys, total } = await response.json();
 												  
 												  totalPages = Math.ceil(total / pageSize);
@@ -254,18 +366,41 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 												      const row = document.createElement('tr');
 												      row.className = 'hover:bg-slate-50 transition-colors';
 												      row.dataset.key = key.api_key;
-												      row.innerHTML = \`
-												        <td class="p-3 w-6"><input type="checkbox" class="key-checkbox rounded border-slate-300" data-key="\${key.api_key}" /></td>
-												        <td class="p-3 font-mono text-sm text-slate-700">\${key.api_key}</td>
-												        <td class="p-3 status-cell">\${statusMap[key.status] || key.status}</td>
-												        <td class="p-3">\${statusMap[key.key_group] || key.key_group}</td>
-												        <td class="p-3 text-sm text-slate-500">\${key.last_checked_at ? new Date(key.last_checked_at).toLocaleString() : 'N/A'}</td>
-												        <td class="p-3 text-center">\${key.failed_count}</td>
-												      \`;
+												      row.innerHTML = 
+													'<td class="p-3 w-6"><input type="checkbox" class="key-checkbox rounded border-slate-300" data-key="' + key.api_key + '" /></td>' +
+													'<td class="p-3 font-mono text-sm text-slate-700">' + key.api_key + '</td>' +
+													'<td class="p-3 status-cell">' + (statusMap[key.status] || key.status) + '</td>' +
+													'<td class="p-3">' + (statusMap[key.key_group] || key.key_group) + '</td>' +
+													'<td class="p-3 text-sm text-slate-500">' + (key.last_checked_at ? new Date(key.last_checked_at).toLocaleString() : 'N/A') + '</td>' +
+													'<td class="p-3 text-center">' + key.failed_count + '</td>' +
+													'<td class="p-3 text-sm text-slate-500">' + (key.endpoint_path || '/') + '</td>';
 												      keysTableBody.appendChild(row);
 												    });
 												  }
 												  updatePaginationControls();
+												  
+												  // 更新页面标题以显示当前端点
+												  if (currentEndpointPath) {
+												    document.querySelector('#page-keys-list h2').textContent = '密钥列表 - 端点: ' + currentEndpointPath;
+												    // 显示返回所有端点的按钮
+												    if (!document.getElementById('back-to-all-endpoints')) {
+												      const backButton = document.createElement('button');
+												      backButton.id = 'back-to-all-endpoints';
+												      backButton.className = 'ml-4 px-3 py-1 bg-slate-200 text-slate-700 rounded hover:bg-slate-300 text-sm';
+												      backButton.textContent = '返回所有端点';
+												      document.querySelector('#page-keys-list h2').appendChild(backButton);
+										      
+												      backButton.addEventListener('click', () => {
+												        currentEndpointPath = null;
+												        showPage('page-endpoints');
+												        fetchAndRenderEndpoints();
+												      });
+												    }
+												  } else {
+												    document.querySelector('#page-keys-list h2').textContent = '密钥列表';
+												    const backButton = document.getElementById('back-to-all-endpoints');
+												    if (backButton) backButton.remove();
+												  }
 												} catch (error) {
 												  keysTableBody.innerHTML = '<tr><td colspan="7" class="p-2 text-center text-red-500">加载失败</td></tr>';
 												  console.error('Failed to fetch keys:', error);
@@ -298,15 +433,19 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 												  return;
 												}
 
-												if (!confirm(\`确定要删除选中的 \${selectedKeys.length} 个密钥吗？\`)) {
+												if (!confirm('确定要删除选中的 ' + selectedKeys.length + ' 个密钥吗？')) {
 												  return;
 												}
 
 												try {
+												  const requestBody = { keys: selectedKeys };
+												  if (currentEndpointPath) {
+												    requestBody.endpointPath = currentEndpointPath;
+												  }
 												  const response = await fetch('/api/keys', {
 												    method: 'DELETE',
 												    headers: { 'Content-Type': 'application/json' },
-												    body: JSON.stringify({ keys: selectedKeys }),
+												    body: JSON.stringify(requestBody),
 												  });
 												  const result = await response.json();
 												  if (response.ok) {
@@ -315,7 +454,7 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 												    updateDeleteButtonVisibility();
 												    selectAllCheckbox.checked = false;
 												  } else {
-												    alert(\`删除密钥失败: \${result.error || '未知错误'}\`);
+												    alert('删除密钥失败: ' + (result.error || '未知错误'));
 												  }
 												} catch (error) {
 												  alert('请求失败，请检查网络连接。');
@@ -336,17 +475,21 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 											});
 
 											try {
+												const requestBody = { keys: keysToCheck };
+												if (currentEndpointPath) {
+												  requestBody.endpointPath = currentEndpointPath;
+												}
 												const response = await fetch('/api/keys/check', {
 													method: 'POST',
 													headers: { 'Content-Type': 'application/json' },
-													body: JSON.stringify({ keys: keysToCheck }),
+													body: JSON.stringify(requestBody),
 												});
 												if (response.ok) {
 													alert('检查完成。');
 													fetchAndRenderKeys();
 												} else {
 													const result = await response.json();
-													alert(\`检查密钥失败: \${result.error || '未知错误'}\`);
+													alert('检查密钥失败: ' + (result.error || '未知错误'));
 												}
 											} catch (error) {
 												alert('请求失败，请检查网络连接。');
@@ -370,24 +513,30 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 
 										addKeysForm.addEventListener('submit', async (e) => {
 												e.preventDefault();
+												const endpointPath = document.getElementById('endpoint-path').value.trim();
 												const keys = apiKeysTextarea.value.split('\\n').map(k => k.trim()).filter(k => k !== '');
 												if (keys.length === 0) {
 												  alert('请输入至少一个API密钥。');
 												  return;
 												}
 												try {
+												  const requestBody = { keys };
+												  if (endpointPath) {
+												    requestBody.endpointPath = endpointPath;
+												  }
 												  const response = await fetch('/api/keys', {
 												    method: 'POST',
 												    headers: { 'Content-Type': 'application/json' },
-												    body: JSON.stringify({ keys }),
+												    body: JSON.stringify(requestBody),
 												  });
 												  const result = await response.json();
 												  if (response.ok) {
 												    alert(result.message || '密钥添加成功。');
 												    apiKeysTextarea.value = '';
+												    document.getElementById('endpoint-path').value = '';
 												    fetchAndRenderKeys();
 												  } else {
-												    alert(\`添加密钥失败: \${result.error || '未知错误'}\`);
+												    alert('添加密钥失败: ' + (result.error || '未知错误'));
 												  }
 												} catch (error) {
 												  alert('请求失败，请检查网络连接。');
@@ -396,6 +545,7 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 										});
 
 										refreshKeysBtn.addEventListener('click', fetchAndRenderKeys);
+										refreshEndpointsBtn.addEventListener('click', fetchAndRenderEndpoints);
 
 										prevPageBtn.addEventListener('click', () => {
 												if (currentPage > 1) {
@@ -413,6 +563,7 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 
 										// Initial load
 										fetchAndRenderKeys();
+										fetchAndRenderEndpoints();
 								});
 				  `,
 					}}

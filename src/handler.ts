@@ -44,7 +44,8 @@ export class LoadBalancer extends DurableObject {
 		// Initialize the database schema upon first creation.
 		this.ctx.storage.sql.exec(`
 			CREATE TABLE IF NOT EXISTS api_keys (
-				api_key TEXT PRIMARY KEY
+				api_key TEXT PRIMARY KEY,
+				endpoint_path TEXT DEFAULT '/'
 			);
 			CREATE TABLE IF NOT EXISTS api_key_statuses (
 				api_key TEXT PRIMARY KEY,
@@ -52,6 +53,7 @@ export class LoadBalancer extends DurableObject {
 				last_checked_at INTEGER,
 				failed_count INTEGER NOT NULL DEFAULT 0,
 				key_group TEXT CHECK(key_group IN ('normal', 'abnormal')) NOT NULL DEFAULT 'normal',
+				endpoint_path TEXT DEFAULT '/',
 				FOREIGN KEY(api_key) REFERENCES api_keys(api_key) ON DELETE CASCADE
 			);
 		`);
@@ -162,9 +164,9 @@ export class LoadBalancer extends DurableObject {
 		}
 
 		// 管理 API 权限校验（使用 HOME_ACCESS_KEY）
-		if (pathname === '/api/keys' || pathname === '/api/keys/check') {
+		if (pathname === '/api/keys' || pathname === '/api/keys/check' || pathname === '/api/endpoints') {
 			if (!isAdminAuthenticated(request, this.env.HOME_ACCESS_KEY)) {
-				return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+				return new Response(JSON.stringify({ error: 'Unauthorized' }) as any, {
 					status: 401,
 					headers: fixCors({ headers: { 'Content-Type': 'application/json' } }).headers,
 				});
@@ -181,6 +183,9 @@ export class LoadBalancer extends DurableObject {
 			if (pathname === '/api/keys/check' && request.method === 'POST') {
 				return this.handleApiKeysCheck(request);
 			}
+			if (pathname === '/api/endpoints' && request.method === 'GET') {
+				return this.getAllEndpoints(request);
+			}
 		}
 
 		const search = url.search;
@@ -192,7 +197,9 @@ export class LoadBalancer extends DurableObject {
 			pathname.endsWith('/embeddings') ||
 			pathname.endsWith('/v1/models')
 		) {
-			return this.handleOpenAI(request);
+			// 提取端点路径（除了API路由部分）
+			const endpointPath = this.extractEndpointPath(pathname);
+			return this.handleOpenAI(request, endpointPath);
 		}
 
 		// Direct Gemini proxy
@@ -201,7 +208,7 @@ export class LoadBalancer extends DurableObject {
 		let targetUrl = `${BASE_URL}${pathname}${search}`;
 
 		if (this.env.FORWARD_CLIENT_KEY_ENABLED) {
-			return this.forwardRequestWithLoadBalancing(targetUrl, request);
+			return this.forwardRequestWithLoadBalancing(targetUrl, request, pathname);
 		}
 
 		if (authKey) {
@@ -226,7 +233,7 @@ export class LoadBalancer extends DurableObject {
 			}
 		}
 		// If authKey is not set, or if it was authorized, proceed to forward with load balancing.
-		return this.forwardRequestWithLoadBalancing(targetUrl, request);
+		return this.forwardRequestWithLoadBalancing(targetUrl, request, pathname);
 	}
 
 	async forwardRequest(targetUrl: string, request: Request, headers: Headers, apiKey: string): Promise<Response> {
@@ -264,7 +271,7 @@ export class LoadBalancer extends DurableObject {
 	}
 
 	// 对请求进行负载均衡，随机分发key
-	private async forwardRequestWithLoadBalancing(targetUrl: string, request: Request): Promise<Response> {
+	private async forwardRequestWithLoadBalancing(targetUrl: string, request: Request, pathname: string): Promise<Response> {
 		try {
 			let headers = new Headers();
 			const url = new URL(targetUrl);
@@ -277,9 +284,12 @@ export class LoadBalancer extends DurableObject {
 			if (this.env.FORWARD_CLIENT_KEY_ENABLED) {
 				return this.forwardRequest(url.toString(), request, headers, ''); // No specific key for forwarded client key
 			}
-			const apiKey = await this.getRandomApiKey();
+			
+			// 提取端点路径
+			const endpointPath = this.extractEndpointPath(pathname);
+			const apiKey = await this.getRandomApiKey(endpointPath);
 			if (!apiKey) {
-				return new Response('No API keys configured in the load balancer.', { status: 500 });
+				return new Response('No API keys configured in the load balancer for this endpoint.', { status: 500 });
 			}
 
 			url.searchParams.set('key', apiKey);
@@ -636,7 +646,9 @@ private async transformMessages(messages: any[]) {
 					throw new Error(`${response.status} ${response.statusText} (${url})`);
 				}
 				mimeType = response.headers.get('content-type');
-				data = Buffer.from(await response.arrayBuffer()).toString('base64');
+				// 使用Cloudflare Workers兼容的API替换Buffer
+				const arrayBuffer = await response.arrayBuffer();
+				data = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
 			} catch (err) {
 				throw new Error('Error fetching image: ' + (err as Error).message);
 			}
@@ -857,7 +869,7 @@ private async transformMessages(messages: any[]) {
 
 	async handleApiKeys(request: Request): Promise<Response> {
 		try {
-			const { keys } = (await request.json()) as { keys: string[] };
+			const { keys, endpointPath = '/' } = (await request.json()) as { keys: string[]; endpointPath?: string };
 			if (!Array.isArray(keys) || keys.length === 0) {
 				return new Response(JSON.stringify({ error: '请求体无效，需要一个包含key的非空数组。' }), {
 					status: 400,
@@ -865,12 +877,15 @@ private async transformMessages(messages: any[]) {
 				});
 			}
 
+			// 标准化端点路径
+			const normalizedPath = endpointPath === '/' ? '/' : `/${endpointPath.replace(/^\/+|\/+$/g, '')}/`;
+
 			for (const key of keys) {
-				await this.ctx.storage.sql.exec('INSERT OR IGNORE INTO api_keys (api_key) VALUES (?)', key);
-				await this.ctx.storage.sql.exec('INSERT OR IGNORE INTO api_key_statuses (api_key) VALUES (?)', key);
+				await this.ctx.storage.sql.exec('INSERT OR IGNORE INTO api_keys (api_key, endpoint_path) VALUES (?, ?)', key, normalizedPath);
+				await this.ctx.storage.sql.exec('INSERT OR IGNORE INTO api_key_statuses (api_key, endpoint_path) VALUES (?, ?)', key, normalizedPath);
 			}
 
-			return new Response(JSON.stringify({ message: 'API密钥添加成功。' }), {
+			return new Response(JSON.stringify({ message: `API密钥添加成功，端点路径: ${normalizedPath}` }), {
 				status: 200,
 				headers: { 'Content-Type': 'application/json' },
 			});
@@ -885,7 +900,7 @@ private async transformMessages(messages: any[]) {
 
 	async handleDeleteApiKeys(request: Request): Promise<Response> {
 		try {
-			const { keys } = (await request.json()) as { keys: string[] };
+			const { keys, endpointPath } = (await request.json()) as { keys: string[]; endpointPath?: string };
 			if (!Array.isArray(keys) || keys.length === 0) {
 				return new Response(JSON.stringify({ error: '请求体无效，需要一个包含key的非空数组。' }), {
 					status: 400,
@@ -893,11 +908,21 @@ private async transformMessages(messages: any[]) {
 				});
 			}
 
-			const batchSize = 500;
-			for (let i = 0; i < keys.length; i += batchSize) {
-				const batch = keys.slice(i, i + batchSize);
-				const placeholders = batch.map(() => '?').join(',');
-				await this.ctx.storage.sql.exec(`DELETE FROM api_keys WHERE api_key IN (${placeholders})`, ...batch);
+			if (endpointPath) {
+				const normalizedPath = endpointPath === '/' ? '/' : `/${endpointPath.replace(/^\/+|\/+$/g, '')}/`;
+				const batchSize = 500;
+				for (let i = 0; i < keys.length; i += batchSize) {
+					const batch = keys.slice(i, i + batchSize);
+					const placeholders = batch.map(() => '?').join(',');
+					await this.ctx.storage.sql.exec(`DELETE FROM api_keys WHERE api_key IN (${placeholders}) AND endpoint_path = ?`, ...batch, normalizedPath);
+				}
+			} else {
+				const batchSize = 500;
+				for (let i = 0; i < keys.length; i += batchSize) {
+					const batch = keys.slice(i, i + batchSize);
+					const placeholders = batch.map(() => '?').join(',');
+					await this.ctx.storage.sql.exec(`DELETE FROM api_keys WHERE api_key IN (${placeholders})`, ...batch);
+				}
 			}
 
 			return new Response(JSON.stringify({ message: 'API密钥删除成功。' }), {
@@ -915,7 +940,7 @@ private async transformMessages(messages: any[]) {
 
 	async handleApiKeysCheck(request: Request): Promise<Response> {
 		try {
-			const { keys } = (await request.json()) as { keys: string[] };
+			const { keys, endpointPath } = (await request.json()) as { keys: string[]; endpointPath?: string };
 			if (!Array.isArray(keys) || keys.length === 0) {
 				return new Response(JSON.stringify({ error: '请求体无效，需要一个包含key的非空数组。' }), {
 					status: 400,
@@ -944,13 +969,28 @@ private async transformMessages(messages: any[]) {
 
 			for (const result of checkResults) {
 				if (result.valid) {
-					await this.ctx.storage.sql.exec(
-						"UPDATE api_key_statuses SET status = 'normal', key_group = 'normal', failed_count = 0, last_checked_at = ? WHERE api_key = ?",
-						Date.now(),
-						result.key
-					);
+					if (endpointPath) {
+						const normalizedPath = endpointPath === '/' ? '/' : `/${endpointPath.replace(/^\/+|\/+$/g, '')}/`;
+						await this.ctx.storage.sql.exec(
+							"UPDATE api_key_statuses SET status = 'normal', key_group = 'normal', failed_count = 0, last_checked_at = ? WHERE api_key = ? AND endpoint_path = ?",
+							Date.now(),
+							result.key,
+							normalizedPath
+						);
+					} else {
+						await this.ctx.storage.sql.exec(
+							"UPDATE api_key_statuses SET status = 'normal', key_group = 'normal', failed_count = 0, last_checked_at = ? WHERE api_key = ?",
+							Date.now(),
+							result.key
+						);
+					}
 				} else {
-					await this.ctx.storage.sql.exec('DELETE FROM api_keys WHERE api_key = ?', result.key);
+					if (endpointPath) {
+						const normalizedPath = endpointPath === '/' ? '/' : `/${endpointPath.replace(/^\/+|\/+$/g, '')}/`;
+						await this.ctx.storage.sql.exec('DELETE FROM api_keys WHERE api_key = ? AND endpoint_path = ?', result.key, normalizedPath);
+					} else {
+						await this.ctx.storage.sql.exec('DELETE FROM api_keys WHERE api_key = ?', result.key);
+					}
 				}
 			}
 
@@ -971,15 +1011,27 @@ private async transformMessages(messages: any[]) {
 			const url = new URL(request.url);
 			const page = parseInt(url.searchParams.get('page') || '1', 10);
 			const pageSize = parseInt(url.searchParams.get('pageSize') || '50', 10);
+			const endpointPath = url.searchParams.get('endpointPath') || null;
 			const offset = (page - 1) * pageSize;
 
-			const totalResult = await this.ctx.storage.sql.exec('SELECT COUNT(*) as count FROM api_key_statuses').raw<any>();
+			let totalResult, results;
+			
+			if (endpointPath) {
+				const normalizedPath = endpointPath === '/' ? '/' : `/${endpointPath.replace(/^\/+|\/+$/g, '')}/`;
+				totalResult = await this.ctx.storage.sql.exec('SELECT COUNT(*) as count FROM api_key_statuses WHERE endpoint_path = ?', normalizedPath).raw<any>();
+				results = await this.ctx.storage.sql
+					.exec('SELECT api_key, status, key_group, last_checked_at, failed_count, endpoint_path FROM api_key_statuses WHERE endpoint_path = ? LIMIT ? OFFSET ?', normalizedPath, pageSize, offset)
+					.raw<any>();
+			} else {
+				totalResult = await this.ctx.storage.sql.exec('SELECT COUNT(*) as count FROM api_key_statuses').raw<any>();
+				results = await this.ctx.storage.sql
+					.exec('SELECT api_key, status, key_group, last_checked_at, failed_count, endpoint_path FROM api_key_statuses LIMIT ? OFFSET ?', pageSize, offset)
+					.raw<any>();
+			}
+
 			const totalArray = Array.from(totalResult);
 			const total = totalArray.length > 0 ? totalArray[0][0] : 0;
 
-			const results = await this.ctx.storage.sql
-				.exec('SELECT api_key, status, key_group, last_checked_at, failed_count FROM api_key_statuses LIMIT ? OFFSET ?', pageSize, offset)
-				.raw<any>();
 			const keys = results
 				? Array.from(results).map((row: any) => ({
 						api_key: row[0],
@@ -987,6 +1039,7 @@ private async transformMessages(messages: any[]) {
 						key_group: row[2],
 						last_checked_at: row[3],
 						failed_count: row[4],
+						endpoint_path: row[5]
 				  }))
 				: [];
 
@@ -1002,32 +1055,60 @@ private async transformMessages(messages: any[]) {
 		}
 	}
 
+	async getAllEndpoints(request: Request): Promise<Response> {
+		try {
+			const results = await this.ctx.storage.sql
+				.exec("SELECT DISTINCT endpoint_path FROM api_key_statuses")
+				.raw<any>();
+			
+			const endpoints = Array.from(results).map((row: any) => row[0]);
+			
+			return new Response(JSON.stringify({ endpoints }), {
+				headers: { 'Content-Type': 'application/json' },
+			});
+		} catch (error: any) {
+			console.error('获取端点列表失败:', error);
+			return new Response(JSON.stringify({ error: error.message || '内部服务器错误' }), {
+				status: 500,
+				headers: { 'Content-Type': 'application/json' },
+			});
+		}
+	}
+
 	// =================================================================================================
 	// Helper Methods
 	// =================================================================================================
 
-	private async getRandomApiKey(): Promise<string | null> {
+	private async getRandomApiKey(endpointPath: string = '/'): Promise<string | null> {
 		try {
-			// First, try to get a key from the normal group
+			// 标准化端点路径
+			const normalizedPath = endpointPath === '/' ? '/' : `/${endpointPath.replace(/^\/+|\/+$/g, '')}/`;
+			
+			// First, try to get a key from the normal group for the specific endpoint
 			let results = await this.ctx.storage.sql
-				.exec("SELECT api_key FROM api_key_statuses WHERE key_group = 'normal' ORDER BY RANDOM() LIMIT 1")
+				.exec("SELECT api_key FROM api_key_statuses WHERE key_group = 'normal' AND endpoint_path = ? ORDER BY RANDOM() LIMIT 1", normalizedPath)
 				.raw<any>();
 			let keys = Array.from(results);
 			if (keys && keys.length > 0) {
 				const key = keys[0][0] as string;
-				console.log(`Gemini Selected API Key from normal group: ${key}`);
+				console.log(`Gemini Selected API Key from normal group for endpoint ${normalizedPath}: ${key}`);
 				return key;
 			}
 
-			// If no keys in normal group, try the abnormal group
+			// If no keys in normal group, try the abnormal group for the specific endpoint
 			results = await this.ctx.storage.sql
-				.exec("SELECT api_key FROM api_key_statuses WHERE key_group = 'abnormal' ORDER BY RANDOM() LIMIT 1")
+				.exec("SELECT api_key FROM api_key_statuses WHERE key_group = 'abnormal' AND endpoint_path = ? ORDER BY RANDOM() LIMIT 1", normalizedPath)
 				.raw<any>();
 			keys = Array.from(results);
 			if (keys && keys.length > 0) {
 				const key = keys[0][0] as string;
-				console.log(`Gemini Selected API Key from abnormal group: ${key}`);
+				console.log(`Gemini Selected API Key from abnormal group for endpoint ${normalizedPath}: ${key}`);
 				return key;
+			}
+
+			// 如果指定端点没有密钥，回退到默认端点
+			if (normalizedPath !== '/') {
+				return this.getRandomApiKey('/');
 			}
 
 			return null;
@@ -1037,7 +1118,7 @@ private async transformMessages(messages: any[]) {
 		}
 	}
 
-	private async handleOpenAI(request: Request): Promise<Response> {
+	private async handleOpenAI(request: Request, endpointPath: string = '/'): Promise<Response> {
 		const authKey = this.env.AUTH_KEY;
 		let apiKey: string | null;
 
@@ -1053,9 +1134,9 @@ private async transformMessages(messages: any[]) {
 			if (token !== authKey) {
 				return new Response('Unauthorized', { status: 401, headers: fixCors({}).headers });
 			}
-			apiKey = await this.getRandomApiKey();
+			apiKey = await this.getRandomApiKey(endpointPath);
 			if (!apiKey) {
-				return new Response('No API keys configured in the load balancer.', { status: 500 });
+				return new Response(`No API keys configured in the load balancer for endpoint: ${endpointPath}`, { status: 500 });
 			}
 		}
 
@@ -1085,5 +1166,26 @@ private async transformMessages(messages: any[]) {
 			default:
 				throw new HttpError('404 Not Found', 404);
 		}
+	}
+
+	private extractEndpointPath(pathname: string): string {
+		// 移除 OpenAI API 路由部分
+		const openaiRoutes = ['/v1/chat/completions', '/v1/completions', '/v1/embeddings', '/v1/models'];
+		
+		for (const route of openaiRoutes) {
+			if (pathname.endsWith(route)) {
+				const endpointPath = pathname.substring(0, pathname.length - route.length);
+				return endpointPath === '' ? '/' : endpointPath;
+			}
+		}
+		
+		// 如果不是 OpenAI 路由，则尝试提取自定义端点路径
+		// 例如: /yCENzh/v1/chat/completions -> /yCENzh/
+		const parts = pathname.split('/').filter(part => part !== '');
+		if (parts.length > 0 && !openaiRoutes.includes(pathname)) {
+			return `/${parts[0]}/`;
+		}
+		
+		return '/';
 	}
 }

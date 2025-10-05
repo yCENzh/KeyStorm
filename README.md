@@ -7,17 +7,20 @@ A Serverless Multi-Key Load Balancer &amp; AI API Proxy powered by DO
 *   将多个 API 密钥聚合到一个端点中。
 *   通过随机轮询密钥池来实现请求的负载均衡。
 *   提供与 OpenAI API 兼容的接口，使现有工具可以轻松集成。
+*   支持多个端点URL，每个端点可以托管不同的API密钥组。
 
 ## ✨ 主要功能
 
 *   **API 代理**: 作为 LLM API 的稳定代理。
 *   **负载均衡**: 在配置的多个 API 密钥之间随机分配请求。
 *   **本地 key 透传**：如果不想使用多 key 负载均衡，可以开启本地 key 透传，此时本项目仅作为一个 API 中转
+*   **多端点支持**：支持创建多个自定义端点URL，每个端点可以管理独立的API密钥组
 *   **OpenAI API 格式兼容**: 支持 `/v1/chat/completions`, `/v1/embeddings` 和 `/v1/models` 等常用 OpenAI 端点。
 *   **流式响应**: 完全支持流式响应。
 *   **API 密钥管理**:
     *   提供一个简单的 Web UI 用于批量添加和查看 API 密钥。
     *   提供 API 接口用于检查并自动清理失效的密钥。
+    *   支持按端点分组管理密钥
 *   **持久化存储**: 使用 Cloudflare Durable Objects 内的 SQLite 安全地存储 API 密钥。
 
 ## 🚀 部署
@@ -70,6 +73,16 @@ A Serverless Multi-Key Load Balancer &amp; AI API Proxy powered by DO
 *   **查看和刷新**: 在右侧面板可以查看已存储的密钥，并可以点击“刷新”按钮更新列表。
 *   **一键检查**： 点击“一键检查”按钮，可以检查 API key 可用性。
 *   **批量删除**： 选中无效的 API key，可以一键删除所有无效的 API key。
+*   **端点管理**： 支持创建多个自定义端点，每个端点可以管理独立的API密钥组
+
+## 🌐 多端点支持
+
+KeyStorm 现在支持创建多个自定义端点URL：
+
+*   默认端点: `https://your-worker.workers.dev/` - 托管默认的API密钥组
+*   自定义端点: `https://your-worker.workers.dev/your-custom-path/` - 托管独立的API密钥组
+
+例如，如果你部署后的地址是 `https://keystorm.abcd.workers.dev/`，这是默认的端点地址，托管了默认的gemini密钥组，你还可以在web端或者通过api设置另一个 `https://keystorm.abcd.workers.dev/abcd/` 等后缀不限的端点地址，托管另外一组apikey，也就是说不止能设置一个端点，支持设置多个。
 
 ## 配置
 
@@ -85,7 +98,7 @@ A Serverless Multi-Key Load Balancer &amp; AI API Proxy powered by DO
 
 使用方式，在 AI 客户端中，填入以下配置：
 
-BaseURL: <你的worker地址>
+BaseURL: <你的worker地址> 或 <你的worker地址/自定义端点路径/>
 
 API 密钥: `<你的AUTH_KEY>`，如果设置了 `FORWARD_CLIENT_KEY_ENABLED` 为 true，那么这里需要填你自己的 key 就行
 
@@ -94,9 +107,10 @@ API 密钥: `<你的AUTH_KEY>`，如果设置了 `FORWARD_CLIENT_KEY_ENABLED` �
 所有管理 API 均需在请求头添加 `Authorization: Bearer <你的HOME_ACCESS_KEY>` 或自动携带 cookie `auth-key` 进行认证：
 
 *   `GET /api/keys`: 获取所有已存储的 API 密钥。
-*   `POST /api/keys`: 批量添加 API 密钥。请求体为 `{"keys": ["key1", "key2"]}`。
+*   `POST /api/keys`: 批量添加 API 密钥。请求体为 `{"keys": ["key1", "key2"], "endpointPath": "/custom-path/"}`。
 *   `GET /api/keys/check`: 检查所有密钥的有效性。
-*   `DELETE /api/keys`: 批量删除 API 密钥。请求体为 `{"keys": ["key1", "key2"]}`。
+*   `DELETE /api/keys`: 批量删除 API 密钥。请求体为 `{"keys": ["key1", "key2"], "endpointPath": "/custom-path/"}`。
+*   `GET /api/endpoints`: 获取所有已配置的端点路径。
 
 普通 OpenAI API 调用只需使用 `AUTH_KEY`，无需管理权限认证
 
