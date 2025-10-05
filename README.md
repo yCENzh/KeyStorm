@@ -75,9 +75,9 @@ A Serverless Multi-Key Load Balancer &amp; AI API Proxy powered by DO
 
 `FORWARD_CLIENT_KEY_ENABLED` : 默认为 false，设置为 true 时，会透传客户端的 key，此时仅作为 Gemini API 代理，没有多 key 负载均衡功能。
 
-`AUTH_KEY` ： 默认为：`ajielu`，本项目API请求密钥，如果 `FORWARD_CLIENT_KEY_ENABLED` 为 true，那么本项目仅作为一个 Gemini API 代理，无需认证
+`AUTH_KEY` ： 默认为：`yCENzh`，本项目API请求密钥，如果 `FORWARD_CLIENT_KEY_ENABLED` 为 true，那么本项目仅作为一个 Gemini API 代理，无需认证
 
-`HOME_ACCESS_KEY`：网页管理面板密码，默认为 `7b18e536c27ab304266db3220b8e000db8fbbe35d6e1fde729a1a1d47303858d`
+`HOME_ACCESS_KEY`：网页管理面板密码，默认为 `e86ea1ceb610e1ed502f5a99a386a0a252a933525187a43f18db6a6d91c91434`
 
 **强烈建议你在Cloudflare Worker环境变量中修改 `HOME_ACCESS_KEY` 和 `AUTH_KEY` 的值，修改完成后重新部署即可。**
 
