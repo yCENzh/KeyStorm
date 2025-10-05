@@ -64,7 +64,7 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 			<head>
 				<meta charset="UTF-8" />
 				<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-				<title>Gemini API 密钥管理</title>
+				<title>多 API 密钥管理</title>
 				<script src="https://cdn.tailwindcss.com"></script>
 			</head>
 			<body class="bg-slate-100 text-slate-800">
@@ -88,7 +88,7 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 					</div>
 					<div class="flex-1 p-8 overflow-y-auto">
 						<div id="page-keys-list">
-							<h2 class="text-3xl font-bold mb-6 text-slate-700">密钥列表</h2>
+							<h2 class="text-3xl font-bold mb-6 text-slate-700">API 密钥列表</h2>
 							<div class="bg-white p-6 rounded-lg shadow-sm">
 								<div class="flex justify-between items-center mb-4">
 									<h3 class="text-xl font-semibold text-slate-600">已存储的密钥</h3>
@@ -121,6 +121,8 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 													<input type="checkbox" id="select-all-keys" class="rounded border-slate-300" />
 												</th>
 												<th class="p-3 text-slate-600 font-semibold">API 密钥</th>
+												<th class="p-3 text-slate-600 font-semibold">API 类型</th>
+												<th class="p-3 text-slate-600 font-semibold">自定义端点</th>
 												<th class="p-3 text-slate-600 font-semibold">状态</th>
 												<th class="p-3 text-slate-600 font-semibold">分组</th>
 												<th class="p-3 text-slate-600 font-semibold">最后检查时间</th>
@@ -156,15 +158,48 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 							</div>
 						</div>
 						<div id="page-add-keys" class="hidden">
-							<h2 class="text-3xl font-bold mb-6 text-slate-700">添加密钥</h2>
+							<h2 class="text-3xl font-bold mb-6 text-slate-700">添加 API 密钥</h2>
 							<div class="bg-white p-6 rounded-lg shadow-sm">
 								<h3 class="text-xl font-semibold mb-4 text-slate-600">批量添加密钥</h3>
 								<form id="add-keys-form">
+									<div class="mb-4">
+										<label class="block text-slate-700 text-sm font-bold mb-2" for="api-type">
+											API 类型
+										</label>
+										<select
+											id="api-type"
+											class="w-full p-3 border rounded-lg bg-slate-50 focus:ring-2 focus:ring-teal-500 focus:border-teal-500 transition"
+										>
+											<option value="gemini">Gemini</option>
+											<option value="openai">OpenAI</option>
+										</select>
+									</div>
+									<div class="mb-4">
+										<label class="block text-slate-700 text-sm font-bold mb-2" for="custom-endpoint">
+											自定义端点 (可选)
+										</label>
+										<input
+											type="text"
+											id="custom-endpoint"
+											class="w-full p-3 border rounded-lg bg-slate-50 focus:ring-2 focus:ring-teal-500 focus:border-teal-500 transition"
+											placeholder="https://api.openai.com/v1"
+										/>
+										<div class="mt-1 text-sm text-slate-500">
+											仅对 OpenAI 类型密钥有效，留空则使用默认端点
+										</div>
+									</div>
 									<textarea
 										id="api-keys"
 										class="w-full h-48 p-3 border rounded-lg bg-slate-50 focus:ring-2 focus:ring-teal-500 focus:border-teal-500 transition"
 										placeholder="请输入API密钥，每行一个"
 									></textarea>
+									<div class="mt-2 text-sm text-slate-500">
+										<p>提示：</p>
+										<ul class="list-disc pl-5 mt-1">
+											<li>Gemini 密钥格式：AIzaSy...</li>
+											<li>OpenAI 密钥格式：sk-...</li>
+										</ul>
+									</div>
 									<button
 										type="submit"
 										class="mt-4 w-full px-4 py-2.5 bg-sky-500 text-white rounded-lg hover:bg-sky-600 transition-colors shadow-sm"
@@ -251,12 +286,15 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 												  } else {
 												    keys.forEach(key => {
 												      const statusMap = { normal: '正常', abnormal: '异常' };
+												      const apiTypeMap = { gemini: 'Gemini', openai: 'OpenAI' };
 												      const row = document.createElement('tr');
 												      row.className = 'hover:bg-slate-50 transition-colors';
 												      row.dataset.key = key.api_key;
 												      row.innerHTML = \`
 												        <td class="p-3 w-6"><input type="checkbox" class="key-checkbox rounded border-slate-300" data-key="\${key.api_key}" /></td>
 												        <td class="p-3 font-mono text-sm text-slate-700">\${key.api_key}</td>
+												        <td class="p-3">\${apiTypeMap[key.api_type] || key.api_type}</td>
+												        <td class="p-3 text-sm">\${key.custom_endpoint || 'N/A'}</td>
 												        <td class="p-3 status-cell">\${statusMap[key.status] || key.status}</td>
 												        <td class="p-3">\${statusMap[key.key_group] || key.key_group}</td>
 												        <td class="p-3 text-sm text-slate-500">\${key.last_checked_at ? new Date(key.last_checked_at).toLocaleString() : 'N/A'}</td>
@@ -375,16 +413,23 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 												  alert('请输入至少一个API密钥。');
 												  return;
 												}
+												const apiType = document.getElementById('api-type').value;
+												const customEndpoint = document.getElementById('custom-endpoint').value.trim() || undefined;
 												try {
+												  const requestData: any = { keys, apiType };
+												  if (customEndpoint) {
+												    requestData.customEndpoint = customEndpoint;
+												  }
 												  const response = await fetch('/api/keys', {
 												    method: 'POST',
 												    headers: { 'Content-Type': 'application/json' },
-												    body: JSON.stringify({ keys }),
+												    body: JSON.stringify(requestData),
 												  });
 												  const result = await response.json();
 												  if (response.ok) {
 												    alert(result.message || '密钥添加成功。');
 												    apiKeysTextarea.value = '';
+												    document.getElementById('custom-endpoint').value = '';
 												    fetchAndRenderKeys();
 												  } else {
 												    alert(\`添加密钥失败: \${result.error || '未知错误'}\`);

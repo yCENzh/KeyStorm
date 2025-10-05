@@ -1,22 +1,24 @@
 # KeyStorm
-A Serverless Multi-Key Load Balancer &amp; AI API Proxy powered by DO
+多 API 密钥负载均衡器和代理服务
 
-> 这是一个部署在 Cloudflare Workers 上的 API 负载均衡器和代理服务，使用了 Durable Objects 来存储和管理 API 密钥，无论你连接的 worker 节点在属于哪个地区，最后都会转发到美国以后再发起请求，不用再担心地区不支持的问题！
+> 这是一个部署在 Cloudflare Workers 上的多 API 负载均衡器和代理服务，支持 Google Gemini 和 OpenAI API。使用 Durable Objects 来存储和管理 API 密钥，无论你连接的 worker 节点在属于哪个地区，最后都会转发到美国以后再发起请求，不用再担心地区不支持的问题！
 
 它旨在解决以下问题：
 *   将多个 API 密钥聚合到一个端点中。
 *   通过随机轮询密钥池来实现请求的负载均衡。
 *   提供与 OpenAI API 兼容的接口，使现有工具可以轻松集成。
+*   支持多种 AI 服务商的 API（目前支持 Google Gemini 和 OpenAI）。
 
 ## ✨ 主要功能
 
+*   **多 API 支持**: 支持 Google Gemini 和 OpenAI API。
 *   **API 代理**: 作为 LLM API 的稳定代理。
 *   **负载均衡**: 在配置的多个 API 密钥之间随机分配请求。
 *   **本地 key 透传**：如果不想使用多 key 负载均衡，可以开启本地 key 透传，此时本项目仅作为一个 API 中转
 *   **OpenAI API 格式兼容**: 支持 `/v1/chat/completions`, `/v1/embeddings` 和 `/v1/models` 等常用 OpenAI 端点。
 *   **流式响应**: 完全支持流式响应。
 *   **API 密钥管理**:
-    *   提供一个简单的 Web UI 用于批量添加和查看 API 密钥。
+    *   提供一个简单的 Web UI 用于批量添加和查看不同类型的 API 密钥。
     *   提供 API 接口用于检查并自动清理失效的密钥。
 *   **持久化存储**: 使用 Cloudflare Durable Objects 内的 SQLite 安全地存储 API 密钥。
 
@@ -94,11 +96,46 @@ API 密钥: `<你的AUTH_KEY>`，如果设置了 `FORWARD_CLIENT_KEY_ENABLED` �
 所有管理 API 均需在请求头添加 `Authorization: Bearer <你的HOME_ACCESS_KEY>` 或自动携带 cookie `auth-key` 进行认证：
 
 *   `GET /api/keys`: 获取所有已存储的 API 密钥。
-*   `POST /api/keys`: 批量添加 API 密钥。请求体为 `{"keys": ["key1", "key2"]}`。
+*   `POST /api/keys`: 批量添加 API 密钥。请求体为 `{"keys": ["key1", "key2"], "apiType": "gemini"}` 或 `{"keys": ["key1", "key2"], "apiType": "openai"}`。对于 OpenAI 类型密钥，还可以指定自定义端点：`{"keys": ["key1"], "apiType": "openai", "customEndpoint": "https://your-custom-endpoint.com/v1"}`。
 *   `GET /api/keys/check`: 检查所有密钥的有效性。
 *   `DELETE /api/keys`: 批量删除 API 密钥。请求体为 `{"keys": ["key1", "key2"]}`。
 
 普通 OpenAI API 调用只需使用 `AUTH_KEY`，无需管理权限认证
+
+### 支持的 API 类型
+
+1. **Google Gemini API**:
+   - 密钥格式: `AIzaSy...`
+   - 支持所有 Gemini 模型
+
+2. **OpenAI API**:
+   - 密钥格式: `sk-...`
+   - 支持所有 OpenAI 模型 (GPT-3.5, GPT-4, etc.)
+   - 支持自定义端点 URL (适用于中转站或其他兼容 OpenAI 格式的模型服务)
+
+### 自定义端点说明
+
+对于 OpenAI 类型的密钥，您可以指定自定义端点 URL，这使得 KeyStorm 可以与各种兼容 OpenAI 格式的中转站或模型服务一起使用。例如：
+- 中转站服务
+- 私有部署的模型服务
+- 其他兼容 OpenAI API 格式的第三方服务
+
+### 添加自定义端点及TOKEN
+
+1. **在 Web 管理界面的"添加 API 密钥"页面中**：
+   - 选择 API 类型为 "OpenAI"
+   - 在"自定义端点"输入框中输入端点 URL（可选）
+   - 输入 OpenAI 格式的 API 密钥（每行一个）
+   - 点击"添加密钥"按钮
+
+2. **通过 API 添加**：
+```
+# 添加带自定义端点的 OpenAI 密钥
+curl -X POST /api/keys \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_HOME_ACCESS_KEY" \
+  -d '{"keys": ["sk-..."], "apiType": "openai", "customEndpoint": "https://your-custom-endpoint.com/v1"}'
+```
 
 ## 支持
 

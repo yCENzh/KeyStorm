@@ -44,10 +44,14 @@ export class LoadBalancer extends DurableObject {
 		// Initialize the database schema upon first creation.
 		this.ctx.storage.sql.exec(`
 			CREATE TABLE IF NOT EXISTS api_keys (
-				api_key TEXT PRIMARY KEY
+				api_key TEXT PRIMARY KEY,
+				api_type TEXT CHECK(api_type IN ('gemini', 'openai')) NOT NULL DEFAULT 'gemini',
+				custom_endpoint TEXT
 			);
 			CREATE TABLE IF NOT EXISTS api_key_statuses (
 				api_key TEXT PRIMARY KEY,
+				api_type TEXT CHECK(api_type IN ('gemini', 'openai')) NOT NULL DEFAULT 'gemini',
+				custom_endpoint TEXT,
 				status TEXT CHECK(status IN ('normal', 'abnormal')) NOT NULL DEFAULT 'normal',
 				last_checked_at INTEGER,
 				failed_count INTEGER NOT NULL DEFAULT 0,
@@ -857,7 +861,7 @@ private async transformMessages(messages: any[]) {
 
 	async handleApiKeys(request: Request): Promise<Response> {
 		try {
-			const { keys } = (await request.json()) as { keys: string[] };
+			const { keys, apiType = 'gemini', customEndpoint } = (await request.json()) as { keys: string[]; apiType?: 'gemini' | 'openai'; customEndpoint?: string };
 			if (!Array.isArray(keys) || keys.length === 0) {
 				return new Response(JSON.stringify({ error: '请求体无效，需要一个包含key的非空数组。' }), {
 					status: 400,
@@ -865,12 +869,32 @@ private async transformMessages(messages: any[]) {
 				});
 			}
 
-			for (const key of keys) {
-				await this.ctx.storage.sql.exec('INSERT OR IGNORE INTO api_keys (api_key) VALUES (?)', key);
-				await this.ctx.storage.sql.exec('INSERT OR IGNORE INTO api_key_statuses (api_key) VALUES (?)', key);
+			// Validate apiType
+			if (apiType !== 'gemini' && apiType !== 'openai') {
+				return new Response(JSON.stringify({ error: 'apiType 必须是 "gemini" 或 "openai"' }), {
+					status: 400,
+					headers: { 'Content-Type': 'application/json' },
+				});
 			}
 
-			return new Response(JSON.stringify({ message: 'API密钥添加成功。' }), {
+			// Validate customEndpoint if provided
+			if (customEndpoint) {
+				try {
+					new URL(customEndpoint);
+				} catch (e) {
+					return new Response(JSON.stringify({ error: '自定义端点URL格式无效' }), {
+						status: 400,
+						headers: { 'Content-Type': 'application/json' },
+					});
+				}
+			}
+
+			for (const key of keys) {
+				await this.ctx.storage.sql.exec('INSERT OR IGNORE INTO api_keys (api_key, api_type, custom_endpoint) VALUES (?, ?, ?)', key, apiType, customEndpoint || null);
+				await this.ctx.storage.sql.exec('INSERT OR IGNORE INTO api_key_statuses (api_key, api_type, custom_endpoint) VALUES (?, ?, ?)', key, apiType, customEndpoint || null);
+			}
+
+			return new Response(JSON.stringify({ message: `API密钥添加成功，类型: ${apiType}${customEndpoint ? `, 自定义端点: ${customEndpoint}` : ''}。` }), {
 				status: 200,
 				headers: { 'Content-Type': 'application/json' },
 			});
@@ -923,21 +947,63 @@ private async transformMessages(messages: any[]) {
 				});
 			}
 
+			// First, get custom endpoints for all keys
+			const keyEndpointMap: Record<string, { apiType: string; customEndpoint: string | null }> = {};
+			for (const key of keys) {
+				const result = await this.ctx.storage.sql
+					.exec('SELECT api_type, custom_endpoint FROM api_keys WHERE api_key = ?', key)
+					.raw<any>();
+				const rows = Array.from(result);
+				if (rows.length > 0) {
+					keyEndpointMap[key] = {
+						apiType: rows[0][0] as string,
+						customEndpoint: rows[0][1] as string | null
+					};
+				} else {
+					// Default behavior for keys not in database
+					const apiType = key.startsWith('sk-') ? 'openai' : 'gemini';
+					keyEndpointMap[key] = { apiType, customEndpoint: null };
+				}
+			}
+
 			const checkResults = await Promise.all(
 				keys.map(async (key) => {
 					try {
-						const response = await fetch(`${BASE_URL}/${API_VERSION}/models/gemini-2.5-flash:generateContent?key=${key}`, {
-							method: 'POST',
-							headers: {
-								'Content-Type': 'application/json',
-							},
-							body: JSON.stringify({
-								contents: [{ parts: [{ text: 'hi' }] }],
-							}),
-						});
-						return { key, valid: response.ok, error: response.ok ? null : await response.text() };
+						const { apiType, customEndpoint } = keyEndpointMap[key] || {
+							apiType: key.startsWith('sk-') ? 'openai' : 'gemini',
+							customEndpoint: null
+						};
+
+						if (apiType === 'openai') {
+							// Check OpenAI key or custom endpoint
+							const baseUrl = customEndpoint || 'https://api.openai.com/v1';
+							const response = await fetch(`${baseUrl}/models`, {
+								headers: {
+									Authorization: `Bearer ${key}`,
+								},
+							});
+							return { key, valid: response.ok, error: response.ok ? null : await response.text(), apiType, customEndpoint };
+						} else {
+							// Check Gemini key (existing logic)
+							const response = await fetch(`${BASE_URL}/${API_VERSION}/models/gemini-2.5-flash:generateContent?key=${key}`, {
+								method: 'POST',
+								headers: {
+									'Content-Type': 'application/json',
+								},
+								body: JSON.stringify({
+									contents: [{ parts: [{ text: 'hi' }] }],
+								}),
+							});
+							return { key, valid: response.ok, error: response.ok ? null : await response.text(), apiType, customEndpoint: null };
+						}
 					} catch (e: any) {
-						return { key, valid: false, error: e.message };
+						return {
+							key,
+							valid: false,
+							error: e.message,
+							apiType: keyEndpointMap[key]?.apiType || (key.startsWith('sk-') ? 'openai' : 'gemini'),
+							customEndpoint: keyEndpointMap[key]?.customEndpoint || null
+						};
 					}
 				})
 			);
@@ -978,15 +1044,17 @@ private async transformMessages(messages: any[]) {
 			const total = totalArray.length > 0 ? totalArray[0][0] : 0;
 
 			const results = await this.ctx.storage.sql
-				.exec('SELECT api_key, status, key_group, last_checked_at, failed_count FROM api_key_statuses LIMIT ? OFFSET ?', pageSize, offset)
+				.exec('SELECT api_key, api_type, custom_endpoint, status, key_group, last_checked_at, failed_count FROM api_key_statuses LIMIT ? OFFSET ?', pageSize, offset)
 				.raw<any>();
 			const keys = results
 				? Array.from(results).map((row: any) => ({
 						api_key: row[0],
-						status: row[1],
-						key_group: row[2],
-						last_checked_at: row[3],
-						failed_count: row[4],
+						api_type: row[1],
+						custom_endpoint: row[2],
+						status: row[3],
+						key_group: row[4],
+						last_checked_at: row[5],
+						failed_count: row[6],
 				  }))
 				: [];
 
@@ -1006,40 +1074,44 @@ private async transformMessages(messages: any[]) {
 	// Helper Methods
 	// =================================================================================================
 
-	private async getRandomApiKey(): Promise<string | null> {
+	private async getRandomApiKeyAndEndpoint(apiType: 'gemini' | 'openai' = 'gemini'): Promise<{ apiKey: string | null; customEndpoint: string | null }> {
 		try {
 			// First, try to get a key from the normal group
 			let results = await this.ctx.storage.sql
-				.exec("SELECT api_key FROM api_key_statuses WHERE key_group = 'normal' ORDER BY RANDOM() LIMIT 1")
+				.exec("SELECT api_key, custom_endpoint FROM api_key_statuses WHERE key_group = 'normal' AND api_type = ? ORDER BY RANDOM() LIMIT 1", apiType)
 				.raw<any>();
 			let keys = Array.from(results);
 			if (keys && keys.length > 0) {
 				const key = keys[0][0] as string;
-				console.log(`Gemini Selected API Key from normal group: ${key}`);
-				return key;
+				const customEndpoint = keys[0][1] as string | null;
+				console.log(`${apiType} Selected API Key from normal group: ${key}`);
+				return { apiKey: key, customEndpoint };
 			}
 
 			// If no keys in normal group, try the abnormal group
 			results = await this.ctx.storage.sql
-				.exec("SELECT api_key FROM api_key_statuses WHERE key_group = 'abnormal' ORDER BY RANDOM() LIMIT 1")
+				.exec("SELECT api_key, custom_endpoint FROM api_key_statuses WHERE key_group = 'abnormal' AND api_type = ? ORDER BY RANDOM() LIMIT 1", apiType)
 				.raw<any>();
 			keys = Array.from(results);
 			if (keys && keys.length > 0) {
 				const key = keys[0][0] as string;
-				console.log(`Gemini Selected API Key from abnormal group: ${key}`);
-				return key;
+				const customEndpoint = keys[0][1] as string | null;
+				console.log(`${apiType} Selected API Key from abnormal group: ${key}`);
+				return { apiKey: key, customEndpoint };
 			}
 
-			return null;
+			return { apiKey: null, customEndpoint: null };
 		} catch (error) {
 			console.error('获取随机API密钥失败:', error);
-			return null;
+			return { apiKey: null, customEndpoint: null };
 		}
 	}
 
 	private async handleOpenAI(request: Request): Promise<Response> {
 		const authKey = this.env.AUTH_KEY;
 		let apiKey: string | null;
+		let apiType: 'gemini' | 'openai' = 'gemini';
+		let customEndpoint: string | null = null;
 
 		const authHeader = request.headers.get('Authorization');
 		apiKey = authHeader?.replace('Bearer ', '') ?? null;
@@ -1053,10 +1125,17 @@ private async transformMessages(messages: any[]) {
 			if (token !== authKey) {
 				return new Response('Unauthorized', { status: 401, headers: fixCors({}).headers });
 			}
-			apiKey = await this.getRandomApiKey();
-			if (!apiKey) {
-				return new Response('No API keys configured in the load balancer.', { status: 500 });
+
+			// Determine API type based on the key prefix or other criteria
+			// For now, we'll use a simple heuristic: if it starts with "sk-", it's OpenAI
+			apiType = apiKey.startsWith('sk-') ? 'openai' : 'gemini';
+
+			const result = await this.getRandomApiKeyAndEndpoint(apiType);
+			if (!result.apiKey) {
+				return new Response(`No ${apiType} API keys configured in the load balancer.`, { status: 500 });
 			}
+			apiKey = result.apiKey;
+			customEndpoint = result.customEndpoint;
 		}
 
 		const url = new URL(request.url);
@@ -1072,6 +1151,37 @@ private async transformMessages(messages: any[]) {
 			return new Response(err.message, fixCors({ statusText: err.message ?? 'Internal Server Error', status: 500 }));
 		};
 
+		// Handle OpenAI API requests
+		if (apiType === 'openai') {
+			const OPENAI_BASE_URL = customEndpoint || 'https://api.openai.com/v1';
+			let targetUrl = `${OPENAI_BASE_URL}${pathname}`;
+
+			// Forward request to OpenAI or custom endpoint
+			const headers = new Headers(request.headers);
+			headers.set('Authorization', `Bearer ${apiKey}`);
+			headers.delete('x-goog-api-key');
+
+			const response = await fetch(targetUrl, {
+				method: request.method,
+				headers: headers,
+				body: request.method === 'GET' || request.method === 'HEAD' ? null : request.body,
+			});
+
+			const responseHeaders = new Headers(response.headers);
+			responseHeaders.set('Access-Control-Allow-Origin', '*');
+			responseHeaders.delete('transfer-encoding');
+			responseHeaders.delete('connection');
+			responseHeaders.delete('keep-alive');
+			responseHeaders.delete('content-encoding');
+			responseHeaders.set('Referrer-Policy', 'no-referrer');
+
+			return new Response(response.body, {
+				status: response.status,
+				headers: responseHeaders,
+			});
+		}
+
+		// Handle Gemini API requests (existing logic)
 		switch (true) {
 			case pathname.endsWith('/chat/completions'):
 				assert(request.method === 'POST');
